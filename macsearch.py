@@ -1,12 +1,34 @@
 #!/usr/bin/python
+#Copyright 2017 Krunoslav Pavic
 import sys
 import subprocess
 import re
 import time
 import os
-import datetime
+from datetime import datetime
 
-VERSION = "MACsearch 1.0"
+
+VERSION = "MACsearch 1.1"
+
+# Print formatting
+CSI = "\x1B["
+RESET = CSI + "0m"
+UNDERLINE = CSI + '4m'
+NORMAL = CSI + '0m'
+GREY = CSI + '0;49;90m'
+GREEN = CSI + '0;49;92m'
+RED = CSI + '0;49;91m'
+BLUE = CSI + '0;49;94m'
+YELLOW = CSI + '0;49;93m'
+
+# Set expired date
+NEVER = datetime(
+    *(time.strptime("2070/12/3123:59:59", "%Y/%m/%d%H:%M:%S")[0:6]))
+
+UPPER = 'U'
+LOWER = 'L'
+DOT = 'D'
+HYPEN = 'H'
 
 oui_import = "Using OUI library"
 try:
@@ -173,7 +195,8 @@ def ping_scan(ip_full_list, timeout="1", limiter=True):
         ip_results = {}
         for ip_addr in ip_sublist:
             try:
-                cmd = 'exec /bin/ping -c 1 -W %s %s 2> /dev/null' % (timeout, str(ip_addr))
+                cmd = 'exec /bin/ping -c 1 -W %s %s 2> /dev/null' % (timeout,
+                                                                     str(ip_addr))
                 ip_results[ip_addr] = subprocess.Popen([cmd], shell=True,
                                                        stdout=subprocess.PIPE,
                                                        close_fds=True)
@@ -206,10 +229,11 @@ def ping_scan(ip_full_list, timeout="1", limiter=True):
     return available_ips
 
 
-# Ping sweep function - ping sweeps all connected interfaces
-def ping_sweep(ip_addresses=None, timeout="1", limiter=True):
-    if ip_addresses is None:
-        ip_addresses = []
+# Ping sweep function - ping sweeps all interfaces and ips in supplied list
+def ping_sweep(ip_list=None, timeout="1", limiter=True):
+    possible_ips = []
+    if ip_list is not None:
+        possible_ips += ip_list
 
     try:
         int_list = ext_command("/sbin/ip", "addr").splitlines()
@@ -229,383 +253,357 @@ def ping_sweep(ip_addresses=None, timeout="1", limiter=True):
 
                 for ip in ip_range:
                     if ip != ip_range[0] and ip != ip_range[-1] and str(
-                            ip) not in ip_addresses:
-                        ip_addresses.append(str(ip))
+                            ip) not in possible_ips:
+                        possible_ips.append(str(ip))
 
-    pingable_ips = ping_scan(ip_addresses, timeout, limiter)
+    pingable_ips = ping_scan(possible_ips, timeout, limiter)
     if not pingable_ips:
-        pingable_ips = ping_scan(ip_addresses, timeout, limiter=True)
+        pingable_ips = ping_scan(possible_ips, timeout, limiter=True)
 
     return pingable_ips
 
 
-# Setting print formatting
-CSI = "\x1B["
-RESET = CSI + "0m"
-UNDERLINE = '4m'
-NORMAL = "0m"
-UNREG = '0;49;90m'
-GREEN = '0;49;92m'
-RED = '0;49;91m'
-BLUE = '0;49;94m'
-YELLOW = '0;49;93m'
+class NetworkHost:
+    def __init__(self, mac=None, ip=None, expires=None, manufacturer=None,
+                 hostname=None, is_reachable=False, has_lease=False,
+                 has_duplicate_ip=False):
+        self.mac = mac
+        self.ip = ip
+        self.expires = expires
+        self.manufacturer = manufacturer
+        self.hostname = hostname
+        self.is_reachable = is_reachable
+        self.has_lease = has_lease
+        self.has_duplicate_ip = has_duplicate_ip
 
-# Set expired date
-SEVENTIES = datetime.datetime(
-    *(time.strptime("1972/01/0123:59:59", "%Y/%m/%d%H:%M:%S")[0:6]))
-THIRTIES = datetime.datetime(
-    *(time.strptime("2030/12/3123:59:59", "%Y/%m/%d%H:%M:%S")[0:6]))
+    @property
+    def json(self):
+        return {'mac': self.mac,
+                'ip': self.ip,
+                'expires': self.expires,
+                'manufacturer': self.manufacturer,
+                'hostname:': self.hostname,
+                'is_reachable': self.is_reachable}
 
-# Initialize lease dictionary and lists
-lease_dict = {}
-patterns = []
-ip_list = []
-pingable_ips = []
+    @property
+    def lease_active(self):
+        now = datetime.now()
+        if self.expires is not None:
+            return True if self.expires > now else False
+        else:
+            return False
 
-# Set flags and counters
-lease_count = 0
-active_count = 0
-sum_hosts = 0
-sum_avail = 0
-sum_unavail = 0
-timeout = "1"
-dhcp = False
-dnsmasq = False
-verbose = False
-ping_check = True
-mac_upper = False
-export = False
-arp_search = False
-scan = False
-dotted = False
-hyphenated = False
-sort_by_ip = False
+    def matches_patterns(self, patterns, strict=False):
+        for pattern in patterns:
+            if strict:
+                pattern = pattern.lower()
+            else:
+                pattern = re.sub('[:|-]', '', pattern).lower()
 
-# Getting current date and time
-today = datetime.datetime.now()
+            if ((self.ip and pattern in self.ip) or
+                (self.mac and pattern in self.mac) or
+                (self.hostname and pattern in self.hostname.lower()) or
+                (self.manufacturer and pattern in self.manufacturer.lower())):
+                return True
+        return False
 
-# Get search pattern if any
-for index, arg in enumerate(sys.argv):
-    if index == 0:
-        continue
-    if arg.startswith("-"):
-        if "c" in arg:
-            ping_check = False
-        if "a" in arg:
-            arp_search = True
-        if "t" in arg:
-            timeout = "2"
-        if "v" in arg:
-            verbose = True
-        if "e" in arg:
-            export = True
-        if "s" in arg:
-            scan = True
-            arp_search = True
-            ping_check = False
-        if "u" in arg:
-            mac_upper = True
-        if "d" in arg:
-            dotted = True
-        if "y" in arg:
-            hyphenated = True
-        if "i" in arg:
-            sort_by_ip = True
-        if arg == "-h" or arg == "--help":
-            print VERSION
-            print "Usage: macsearch [option(s)] [pattern(s)]"
-            print " Lists all dhcp leases and/or arp table members with following data: MAC address, IP address, hostname, manufacturer and expiry status of lease"
-            print " Checks if IP adresses are reachable by ping. Unreachable hosts are greyed out."
-            print " Filters according to [pattern(s)]. Sorts by lease expiry."
-            print "Options:"
-            print " -a      Search ARP table for addresses that are not in DHCP lease table"
-            print " -c      Do not CHECK if IP address is reachable by ping."
-            print " -s      Ping SWEEP all directly connected subnets and known leases - fills ARP table and checks availability (slowest option)"
-            print " -t      Set TIMEOUT of all ping commands to 2 seconds instead of 1 (applies to -c and -s options)"
-            print ""
-            print " -v      Set high VERBOSITY - display full hostnames, manufacturers, and end time of leases (instead of [ACT/EXP])"
-            print " -e      EXPORT all data in CSV form. If -c or -s options are used, a column with ping status [1/0] will be added"
-            print " -i      Sort by IP address instead of time of lease expiry"
-            print ""
-            print " -u      Display MAC address in UPPERCASE"
-            print " -d      Display MAC address with \":\" (DOTS) every 2 characters"
-            print " -y      Display MAC address with \"-\" (HYPEN) every 2 characters"
-            print ""
-            raise SystemExit
-    else:
-        arg = re.sub('[:|-]', '', arg).lower()
-        patterns.append(arg)
+    def format_mac(self, mac_format=LOWER):
+        if self.mac:
+            formatted_mac = self.mac
+            if UPPER in mac_format:
+                formatted_mac = formatted_mac.upper()
+            if HYPEN in mac_format:
+                t = iter(formatted_mac)
+                formatted_mac = '-'.join(a+b for a,b in zip(t, t))
+            elif DOT in mac_format:
+                t = iter(formatted_mac)
+                formatted_mac = ':'.join(a+b for a,b in zip(t, t))
+            return formatted_mac
+        else:
+            return None
 
-# Printing header
-if not export:
-    print VERSION
-    print oui_import
-    if ping_check:
-        print "Checking address availability"
-    if arp_search:
-        print "Checking arp table"
-    if scan:
-        print "Scanning all available IP addresses"
-    print ""
-    print CSI + UNDERLINE + " IP               MAC                HOSTNAME                  MANUFACTURER             LEASE                    " + RESET
-    print ""
+    def display(self, verbose=False, csv=False, delimiter=';',
+                mac_format='LOWER'):
+        if csv:
+            return delimiter.join([self.ip or '',
+                                   self.format_mac(mac_format) or '',
+                                   self.hostname or '',
+                                   self.manufacturer or '',
+                                   self.expires or '',
+                                   '1' if self.is_reachable else '0'])
+        else:
+            act_color = GREEN if self.lease_active else RED
+            if self.has_lease:
+                if verbose:
+                    lease_info = str(self.expires)
+                else:
+                    lease_info = 'ACT' if self.lease_active else 'EXP'
+            else:
+                act_color = GREY
+                lease_info = 'N/A'
 
-# Getting list of dhcpd leases
-if os.path.exists("/var/lib/dhcpd/dhcpd.leases"):
-    leases = ext_command("cat", "/var/lib/dhcpd/dhcpd.leases").split("}")
-    dhcp = True
-elif os.path.exists("/var/log/dnsmasq.leases"):
-    leases = ext_command("cat", "/var/log/dnsmasq.leases").splitlines()
-    dnsmasq = True
-else:
+            lease_display = '%s[ %s%s%s ]' % (NORMAL, act_color, lease_info,
+                                              RESET)
+
+            highlight = NORMAL if self.is_reachable else GREY
+
+            host_info = '%-16s %-18s %-25s %-24s %-32s' % (self.ip or 'N/A',
+                                                           self.format_mac(mac_format) or 'N/A',
+                                                           self.hostname or 'N/A',
+                                                           self.manufacturer or 'N/A',
+                                                           lease_display)
+
+            return '%s %s %s' % (highlight, host_info, RESET)
+
+
+def macsearch(ping_check=True, arp_search=False, scan=False, sort_by_ip=False,
+              patterns=None, timeout='1'):
+    # Initialize lease dictionary and lists
+    hosts = []
+    patterns = patterns if patterns is not None else []
+    reachable_ips = []
+
+    dhcp = False
+    dnsmasq = False
     leases = []
 
-# Sorting lease and arp entries into dictionary
-for lease in leases:
-    lease_success = False
-    if "lease" in lease and dhcp:
-        lease = lease.splitlines()
-        hostname = "N/A"
-        manufacturer = "N/A"
-        expires = SEVENTIES
+    # Getting list of dhcpd leases
+    if os.path.exists("/var/lib/dhcpd/dhcpd.leases"):
+        leases = ext_command("cat", "/var/lib/dhcpd/dhcpd.leases").split("}")
+        dhcp = True
+    elif os.path.exists("/var/log/dnsmasq.leases"):
+        leases = ext_command("cat", "/var/log/dnsmasq.leases").splitlines()
+        dnsmasq = True
 
-        for line in lease:
-            if "lease" in line:
-                ip = line.split()[1]
-            if "hardware ethernet" in line:
-                mac = line.split()[2]
-                mac = re.sub('[:]', '', mac)
-                mac = re.sub('[;]', '', mac)
-                mac = mac.lower()
-            if "hostname" in line:
-                hostname = line.split()[1].strip('"').rstrip('";')
-            if "ends" in line:
-                if "never" in line:
-                    expires = THIRTIES
-                else:
-                    exp_date = line.split()[2]
-                    exp_time = line.split()[3]
-                    exp_time = re.sub('[;]', '', exp_time)
-                    exp = exp_date + exp_time
+    # Sort leases into host table - works with either DHCP or dnsmasq
+    for lease in leases:
+        lease_host = NetworkHost()
+        if "lease" in lease and dhcp:
+            lease = lease.splitlines()
 
-                    try:
-                        expires = datetime.datetime.strptime(exp,
-                                                             "%Y/%m/%d%H:%M:%S")
-                    except AttributeError:
-                        expires = datetime.datetime(
-                            *(time.strptime(exp, "%Y/%m/%d%H:%M:%S")[0:6]))
-        try:
-            manufacturer = oui_dict[mac[:6].upper()]
-        except KeyError:
-            manufacturer = "N/A"
+            for line in lease:
+                if "lease" in line:
+                    lease_host.ip = line.split()[1]
+                if "hardware ethernet" in line:
+                    raw_mac = line.split()[2]
+                    raw_mac = re.sub('[:]', '', raw_mac)
+                    raw_mac = re.sub('[;]', '', raw_mac)
+                    lease_host.mac = raw_mac.lower()
+                if "hostname" in line:
+                    lease_host.hostname = line.split()[1].strip('"').rstrip('";')
+                if "ends" in line:
+                    if "never" in line:
+                        lease_host.expires = NEVER
+                    else:
+                        exp_date = line.split()[2]
+                        exp_time = line.split()[3]
+                        exp_time = re.sub('[;]', '', exp_time)
+                        exp = exp_date + exp_time
 
-        lease_success = True
-
-    elif dnsmasq:
-        lease = lease.split()
-        hostname = "N/A"
-        manufacturer = "N/A"
-        expires = SEVENTIES
-
-        mac = lease[1]
-        mac = re.sub('[:]', '', mac)
-        ip = lease[2]
-        if lease[3] != "*":
-            hostname = lease[3]
-        if lease[0] != "*":
-            expires = datetime.datetime.fromtimestamp(int(lease[0]))
-
-        try:
-            manufacturer = oui_dict[mac[:6].upper()]
-        except KeyError:
-            manufacturer = "N/A"
-
-        lease_success = True
-
-    if lease_success:
-        # Filtering for patterns if supplied
-        if len(patterns) > 0:
-            for pattern in patterns:
-                if pattern in mac or pattern in ip or pattern in hostname.lower() or pattern in manufacturer.lower():
-                    lease_dict[mac] = [ip, expires, hostname, manufacturer]
-                    ip_list.append(ip)
-                    break
-        else:
-            lease_dict[mac] = [ip, expires, hostname, manufacturer]
-            ip_list.append(ip)
-
-sum_leases = len(lease_dict)
-
-# If scan option is enabled, scans all interfaces and fills the arp table
-if scan:
-    arp_search = True
-    ping_check = False
-    pingable_ips = ping_sweep(ip_list, timeout)
-
-if arp_search:
-    try:
-        arplist = ext_command("arp", "-an").splitlines()
-        arp_success = True
-    except OSError:
-        arplist = ext_command("ip", "neighbour").splitlines()
-        arp_success = False
-
-    for macline in arplist:
-        manufacturer = "N/A"
-        hostname = "N/A"
-        expires = SEVENTIES
-        if arp_success:
-            ip = macline.split()[1][1:-1]
-            mac = macline.split()[3]
-            mac = re.sub('[:]', '', mac).lower()
-        else:
-            ip = macline.split()[0]
+                        try:
+                            lease_host.expires = datetime.strptime(exp,
+                                                                 "%Y/%m/%d%H:%M:%S")
+                        except AttributeError:
+                            lease_host.expires = datetime(
+                                *(time.strptime(exp, "%Y/%m/%d%H:%M:%S")[0:6]))
             try:
-                mac = macline.split()[4]
-                mac = re.sub('[:]', '', mac).lower()
-            except IndexError:
-                continue
+                lease_host.manufacturer = oui_dict[lease_host.mac[:6].upper()]
+            except KeyError:
+                lease_host.manufacturer = None
 
+        elif dnsmasq:
+            lease = lease.split()
+
+            raw_mac = lease[1]
+            lease_host.mac = re.sub('[:]', '', raw_mac)
+            lease_host.ip = lease[2]
+            if lease[3] != "*":
+                lease_host.hostname = lease[3]
+            if lease[0] != "*":
+                lease_host.expires = datetime.fromtimestamp(int(lease[0]))
+
+            try:
+                lease_host.manufacturer = oui_dict[lease_host.mac[:6].upper()]
+            except KeyError:
+                lease_host.manufacturer = None
+
+        if lease_host.ip or lease_host.mac:
+            lease_host.has_lease = True
+            hosts.append(lease_host)
+
+    # If scan option is enabled, scan all interfaces and fills the arp table
+    if scan:
+        ip_list = [h.ip for h in hosts]
+        reachable_ips = ping_sweep([h.ip for h in hosts], timeout)
+        for reachable_ip in reachable_ips:
+            if reachable_ip not in ip_list:
+                found_host = NetworkHost(ip=reachable_ip)
+                hosts.append(found_host)
+
+    # If arp option is enabled, check arp table for missing IP addresses,
+    # update existing hosts with MAC addresses if missing
+    if arp_search:
+        mac_list = [h.mac for h in hosts]
+        ip_list = [h.ip for h in hosts]
         try:
-            manufacturer = oui_dict[mac[:6].upper()]
-        except KeyError:
-            manufacturer = "N/A"
+            arp_lines = ext_command("arp", "-an").splitlines()
+            arp_success = True
+        except OSError:
+            arp_lines = ext_command("ip", "neighbour").splitlines()
+            arp_success = False
 
-        if mac != "<incomplete>":
-            if mac not in lease_dict:
-
-                # Filtering for patterns if supplied
-                if len(patterns) > 0:
-                    for pattern in patterns:
-                        if pattern in mac or pattern in ip or pattern in manufacturer.lower():
-                            lease_dict[mac] = [ip, expires, hostname,
-                                               manufacturer]
-                            ip_list.append(ip)
-                            break
-                else:
-                    lease_dict[mac] = [ip, expires, hostname, manufacturer]
-                    ip_list.append(ip)
-            elif lease_dict[mac][0] != ip:
-                if len(patterns) > 0:
-                    for pattern in patterns:
-                        if pattern in mac or pattern in ip or pattern in manufacturer.lower():
-                            lease_dict[mac] = [ip, expires, hostname,
-                                               manufacturer]
-                            ip_list.append(ip)
-                            break
-                else:
-                    lease_dict[mac] = [ip, expires, hostname, manufacturer]
-                    ip_list.append(ip)
-
-# Checking host availability (if -c option is not enabled)
-if ping_check:
-    pingable_ips = ping_scan(ip_list, timeout)  # Using only subproccess
-elif not scan:
-    pingable_ips = ip_list
-
-if sort_by_ip:
-    mac_list = sorted(lease_dict.keys(), key=lambda k: lease_dict[k][0])
-else:
-    mac_list = sorted(lease_dict.keys(), key=lambda k: lease_dict[k][1])
-
-# Check for duplicate IP addresses
-ip_list = [item[0] for item in lease_dict.values()]
-ip_duplicates = find_duplicates(ip_list)
-
-# Formatting and printing all available info
-if mac_list:
-    for mac in mac_list:
-        info = lease_dict[mac]
-        ip = info[0]
-        expires = info[1]
-        hostname = info[2]
-        manufacturer = info[3]
-
-        status = True
-        act_color = GREEN
-        sum_hosts += 1
-
-        # Preparing lease expiry info, depending on verbosity
-        if expires is not None and expires >= today:
-            # if verbose:
-            if True:
-                active = str(expires)
+        for arp_line in arp_lines:
+            arp_host = NetworkHost()
+            if arp_success:
+                arp_host.ip = arp_line.split()[1][1:-1]
+                raw_mac = arp_line.split()[3]
+                arp_host.mac = re.sub('[:]', '', raw_mac).lower()
             else:
-                active = "ACT"
+                arp_host.ip = arp_line.split()[0]
+                try:
+                    raw_mac = arp_line.split()[4]
+                    arp_host.mac = re.sub('[:]', '', raw_mac).lower()
+                except IndexError:
+                    continue
+            try:
+                arp_host.manufacturer = oui_dict[arp_host.mac[:6].upper()]
+            except KeyError:
+                arp_host.manufacturer = None
 
-            if expires == THIRTIES:
-                act_color = BLUE
-        else:
-            if expires == SEVENTIES:
-                active = "N/A"
-                act_color = UNREG
-            else:
-                # if verbose:
-                if True:
-                    active = str(expires)
-                else:
-                    active = "EXP"
-                act_color = RED
+            if arp_host.mac != "<incomplete>":
+                if arp_host.ip in ip_list and arp_host.mac not in mac_list:
+                    for test_host in hosts:
+                        if arp_host.ip == test_host.ip:
+                            test_host.mac = arp_host.mac
+                            test_host.manufacturer = arp_host.manufacturer
+                elif arp_host.mac not in mac_list or arp_host.ip not in ip_list:
+                    hosts.append(arp_host)
 
-        active_display = CSI + NORMAL + "[ " + CSI + act_color + active + RESET + " ]"
+    ip_list = [h.ip for h in hosts]
+    reachable_ips = reachable_ips if scan else ip_list
+    if ping_check:
+        reachable_ips = ping_scan(ip_list, timeout)
 
-        # Checking if host is among pingable hosts
-        if ping_check or scan:
-            if ip not in pingable_ips:
-                status = False
-                sum_unavail += 1
-            else:
-                sum_avail += 1
+    duplicate_ips = find_duplicates(ip_list)
 
-        if ip in ip_duplicates:
-            if status:
-                ip = CSI + YELLOW + ip + RESET + (" " * (16 - len(ip)))
-            else:
-                ip = CSI + YELLOW + ip + CSI + UNREG + (" " * (16 - len(ip)))
+    for host in hosts:
+        if host.ip in reachable_ips:
+            host.is_reachable = True
+        if host.ip in duplicate_ips:
+            host.has_duplicate_ip = True
 
-        # Adjusting MAC address presentation
-        if mac_upper:
-            mac = mac.upper()
-
-        if dotted and not hyphenated:
-            t = iter(mac)
-            mac = ':'.join(a + b for a, b in zip(t, t))
-
-        if hyphenated:
-            t = iter(mac)
-            mac = '-'.join(a + b for a, b in zip(t, t))
-
-        # Printing info depending on selected options
-        if export:
-            if ping_check or scan:
-                print '%s;%s;%s;%s;%s;%s' % (
-                ip, mac, hostname, manufacturer, active, str(int(status)))
-            else:
-                print '%s;%s;%s;%s;%s' % (ip, mac, hostname, manufacturer, active)
-        elif status:
-            print ' %-16s %-18s %-25s %-24s %-32s' % (ip, mac, hostname, manufacturer, active_display)
-        else:
-            print CSI + UNREG + ' %-16s %-18s %-25s %-24s %-32s' % (ip, mac, hostname, manufacturer, active_display) + RESET
-
-# Printing summary
-if not export:
-    if not ping_check and not scan:
-        if arp_search:
-            print ""
-            print "Hosts: " + str(sum_hosts) + "(" + str(
-                sum_leases) + " leases)"
-            print ""
-        else:
-            print ""
-            print "Hosts: " + str(sum_hosts)
-            print ""
-    elif arp_search:
-        print ""
-        print "Hosts: " + str(sum_hosts) + "(" + str(
-            sum_leases) + " leases) - Available: " + str(
-            sum_avail) + ", Unavailable: " + str(sum_unavail)
+    if sort_by_ip:
+        sorted(hosts, key=lambda k: k.ip)
     else:
-        print ""
-        print "Hosts: " + str(sum_hosts) + " - Available: " + str(
-            sum_avail) + ", Unavailable: " + str(sum_unavail)
+        sorted(hosts, key=lambda k: k.ip)
 
+    return hosts
+
+
+if __name__ == '__main__':
+    patterns = []
+    verbose = False
+    ping_check = True
+    mac_format = LOWER
+    export = False
+    arp_search = False
+    scan = False
+    sort_by_ip = False
+    lease_count = 0
+    active_count = 0
+    sum_hosts = 0
+    sum_avail = 0
+    sum_unavail = 0
+    timeout = '1'
+    # Get search pattern if any
+    for index, arg in enumerate(sys.argv):
+        if index == 0:
+            continue
+        if arg.startswith('-'):
+            if 'c' in arg:
+                ping_check = False
+            if 'a' in arg:
+                arp_search = True
+            if 't' in arg:
+                timeout = '3'
+            if 'v' in arg:
+                verbose = True
+            if 'e' in arg:
+                export = True
+            if 's' in arg:
+                scan = True
+                arp_search = True
+                ping_check = False
+            if 'u' in arg:
+                mac_format += UPPER
+            if 'd' in arg:
+                mac_format += DOT
+            if 'y' in arg:
+                mac_format += HYPEN
+            if 'i' in arg:
+                sort_by_ip = True
+            if arg == '-h' or arg == '--help':
+                print VERSION
+                print 'Usage: macsearch [option(s)] [pattern(s)]'
+                print ' Lists all dhcp leases and/or arp table members with following data: MAC address, IP address, hostname, manufacturer and expiry status of lease'
+                print ' Checks if IP adresses are reachable by ping. Unreachable hosts are greyed out.'
+                print ' Filters according to [pattern(s)]. Sorts by lease expiry.'
+                print 'Options:'
+                print ' -a      Search ARP table for addresses that are not in DHCP lease table'
+                print ' -c      Do not CHECK if IP address is reachable by ping.'
+                print ' -s      Ping SWEEP all directly connected subnets and known leases - fills ARP table and checks availability (slowest option)'
+                print ' -t      Set TIMEOUT of all ping commands to 2 seconds instead of 1 (applies to -c and -s options)'
+                print ''
+                print ' -v      Set high VERBOSITY - display full hostnames, manufacturers, and end time of leases (instead of [ACT/EXP])'
+                print ' -e      EXPORT all data in CSV form. If -c or -s options are used, a column with ping status [1/0] will be added'
+                print ' -i      Sort by IP address instead of time of lease expiry'
+                print ''
+                print ' -u      Display MAC address in UPPERCASE'
+                print ' -d      Display MAC address with \":\" (DOTS) every 2 characters'
+                print ' -y      Display MAC address with \"-\" (HYPEN) every 2 characters'
+                print ''
+                raise SystemExit
+        else:
+            #arg = re.sub('[:|-]', '', arg).lower()
+            patterns.append(arg)
+
+    # Printing header
+    if not export:
+        print VERSION
+        print oui_import
+        if ping_check:
+            print 'Checking address availability'
+        if arp_search:
+            print 'Checking arp table'
+        if scan:
+            print 'Scanning all available IP addresses'
+        print ''
+        print '%s %-16s %-18s %-25s %-24s %-32s %s' % (UNDERLINE, 'IP', 'MAC',
+                                                       'HOSTNAME',
+                                                       'MANUFACTURER',
+                                                       'LEASE', RESET)
+        print ''
+
+    hosts = macsearch(scan=scan, ping_check=ping_check,
+                      arp_search=arp_search, timeout=timeout,
+                      sort_by_ip=sort_by_ip, patterns=patterns)
+
+    # Formatting and printing all available info
+    if hosts:
+        for host in hosts:
+            if len(patterns) == 0 or host.matches_patterns(patterns):
+                print host.display(verbose=verbose, csv=export,
+                                   mac_format=mac_format)
+
+    num_hosts_with_lease = len([h for h in hosts if h.has_lease])
+    num_reachable_hosts = len([h for h in hosts if h.is_reachable])
+
+    summary = 'Hosts: %s (%s leases)' % (str(len(hosts)),
+                                         str(num_hosts_with_lease))
+    if scan or ping_check:
+        summary += ' - Available: %s, Unavaliable: %s' % (str(num_reachable_hosts),
+                                                          str(len(hosts)))
+    if not export:
+        print ''
+        print summary
+        print ''
