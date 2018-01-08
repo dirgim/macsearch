@@ -183,15 +183,18 @@ def process_cidr(cidr):
 def ping_scan(ip_full_list, timeout="1", limiter=True):
     available_ips = []
     ping_results = {}
+    overload = False
 
     if limiter:
         ip_sub_lists = [ip_full_list[x:x + 256] for x in
                        xrange(0, len(ip_full_list), 256)]
     else:
-        ip_sub_lists = [ip_full_list[x:x + 1024] for x in
-                       xrange(0, len(ip_full_list), 1024)]
+        ip_sub_lists = [ip_full_list[x:x + 1000] for x in
+                       xrange(0, len(ip_full_list), 1000)]
 
     for ip_sublist in ip_sub_lists:
+        if overload:
+            break
         ip_results = {}
         for ip_addr in ip_sublist:
             try:
@@ -201,9 +204,18 @@ def ping_scan(ip_full_list, timeout="1", limiter=True):
                                                        stdout=subprocess.PIPE,
                                                        close_fds=True)
                 ping_results[ip_addr] = ""
-            except OSError:
-                # Too many concurrent pings, exiting to try with limiter
-                return False
+            except OSError as e:
+                overload = True
+                # Try to close as many processes as possible
+                for ip_addr, result in ip_results.items():
+                    if result.poll is not None:
+                        ping_results[ip_addr] = str(result.stdout.read())
+                    try:
+                        result.kill()
+                    except AttributeError:
+                        pass
+                # Too many concurrent pings, exiting
+                break
 
         while True:
             done = True
@@ -222,8 +234,9 @@ def ping_scan(ip_full_list, timeout="1", limiter=True):
 
     for ip_sublist in ip_sub_lists:
         for ip_addr in ip_sublist:
-            if "0 received," not in ping_results[ip_addr] and \
-               "0 packets received," not in ping_results[ip_addr]:
+            if ping_results.get(ip_addr) and "0 received," not in \
+                    ping_results[ip_addr] and "0 packets received," not in \
+                    ping_results[ip_addr]:
                 available_ips.append(ip_addr)
 
     return available_ips
@@ -357,7 +370,7 @@ class NetworkHost:
 
 
 def macsearch(ping_check=True, arp_search=False, scan=False, sort_by_ip=False,
-              patterns=None, timeout='1'):
+              patterns=None, timeout='1', network_scan=False):
     # Initialize lease dictionary and lists
     hosts = []
     patterns = patterns if patterns is not None else []
@@ -430,6 +443,19 @@ def macsearch(ping_check=True, arp_search=False, scan=False, sort_by_ip=False,
         if lease_host.ip or lease_host.mac:
             lease_host.has_lease = True
             hosts.append(lease_host)
+
+    if network_scan:
+        ip_list = [h.ip for h in hosts]
+        for pattern in patterns:
+            try:
+                ips_in_range = ping_scan(process_cidr(pattern), timeout)
+                for ip_in_range in ips_in_range:
+                    if ip_in_range not in ip_list:
+                        hosts.append(NetworkHost(ip=ip_in_range,
+                                                 is_reachable=True))
+            except (IndexError, ValueError):
+                # Pattern is not a valid CIDR
+                pass
 
     # If scan option is enabled, scan all interfaces and fills the arp table
     if scan:
@@ -509,6 +535,7 @@ if __name__ == '__main__':
     arp_search = False
     scan = False
     sort_by_ip = False
+    network_scan = False
     lease_count = 0
     active_count = 0
     sum_hosts = 0
@@ -542,6 +569,9 @@ if __name__ == '__main__':
                 mac_format += HYPEN
             if 'i' in arg:
                 sort_by_ip = True
+            if 'n' in arg:
+                network_scan = True
+                arp_search = True
             if arg == '-h' or arg == '--help':
                 print VERSION
                 print 'Usage: macsearch [option(s)] [pattern(s)]'
@@ -552,6 +582,7 @@ if __name__ == '__main__':
                 print ' -a      Search ARP table for addresses that are not in DHCP lease table'
                 print ' -c      Do not CHECK if IP address is reachable by ping.'
                 print ' -s      Ping SWEEP all directly connected subnets and known leases - fills ARP table and checks availability (slowest option)'
+                print ' -n      Scan network(s) provided as pattern(s) in CIDR format (e.g 192.168.1.0/24)'
                 print ' -t      Set TIMEOUT of all ping commands to 2 seconds instead of 1 (applies to -c and -s options)'
                 print ''
                 print ' -v      Set high VERBOSITY - display full hostnames, manufacturers, and end time of leases (instead of [ACT/EXP])'
@@ -586,12 +617,13 @@ if __name__ == '__main__':
 
     hosts = macsearch(scan=scan, ping_check=ping_check,
                       arp_search=arp_search, timeout=timeout,
-                      sort_by_ip=sort_by_ip, patterns=patterns)
+                      sort_by_ip=sort_by_ip, patterns=patterns,
+                      network_scan=network_scan)
 
     # Formatting and printing all available info
     if hosts:
         for host in hosts:
-            if len(patterns) == 0 or host.matches_patterns(patterns):
+            if len(patterns) == 0 or host.matches_patterns(patterns) or network_scan:
                 print host.display(verbose=verbose, csv=export,
                                    mac_format=mac_format)
 
